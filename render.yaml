@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: anony
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: DB_NAME
+        value: anonymouschat
+      - key: MONGODB_URI
+        sync: false
