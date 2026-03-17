@@ -134,6 +134,10 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
+app.get('/', (_req, res) => {
+  res.send('Server is running 🚀');
+});
+
 app.post('/api/upload', upload.single('file'), (req, res) => {
   const file = req.file;
   if (!file) {
