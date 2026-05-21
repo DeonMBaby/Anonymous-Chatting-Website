@@ -26,10 +26,29 @@ const MONGODB_URI =
   process.env.ATLAS_URI ||
   process.env['ATLAS URI'];
 const DB_NAME = process.env.DB_NAME || 'anonymous_chat';
+const DATABASE_RETRY_MS = Number(process.env.DATABASE_RETRY_MS || 15000);
+const staticDir = fs.existsSync(path.join(__dirname, 'public'))
+  ? path.join(__dirname, 'public')
+  : path.join(__dirname, 'dist');
+const mongoConfigSource = process.env.MONGODB_URI
+  ? 'MONGODB_URI'
+  : process.env.ATLAS_URI
+    ? 'ATLAS_URI'
+    : process.env['ATLAS URI']
+      ? 'ATLAS URI'
+      : null;
+const databaseState = {
+  status: MONGODB_URI ? 'idle' : 'missing_config',
+  lastError: MONGODB_URI ? null : 'Missing MongoDB connection string.',
+  lastConnectedAt: null,
+  retryAt: null,
+};
+
+let databaseRetryTimer = null;
 
 app.use(cors());
 app.use(express.json());
-app.use(express.static('dist'));
+app.use(express.static(staticDir));
 
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
@@ -112,6 +131,91 @@ async function loadRoomMessages(roomCode) {
   return Message.find({ roomCode }).sort({ timestamp: 1, _id: 1 }).lean();
 }
 
+async function createAndBroadcastMessage(data = {}) {
+  const roomCode = normalizeRoomCode(data.roomCode);
+  if (!roomCode) {
+    throw new Error('Room code is required');
+  }
+
+  const roomExists = await ensureRoomExists(roomCode);
+  if (!roomExists) {
+    throw new Error('Room not found');
+  }
+
+  const messagePayload = {
+    roomCode,
+    text: typeof data.text === 'string' ? data.text.trim() : '',
+    user: data.user || 'Anonymous',
+    type: data.type === 'file' ? 'file' : 'text',
+    timestamp: new Date(),
+  };
+
+  if (messagePayload.type === 'file' && data.file) {
+    messagePayload.file = {
+      url: data.file.url,
+      originalName: data.file.originalName,
+      size: data.file.size,
+      mimeType: data.file.mimeType,
+    };
+  }
+
+  if (messagePayload.type === 'text' && !messagePayload.text) {
+    throw new Error('Message cannot be empty');
+  }
+
+  const savedMessage = await Message.create(messagePayload);
+  const plainMessage = savedMessage.toObject();
+  io.to(roomCode).emit('newMessage', plainMessage);
+  return plainMessage;
+}
+
+function redactMongoUri(uri) {
+  if (!uri) {
+    return null;
+  }
+
+  return uri.replace(/\/\/([^:@/]+):([^@/]+)@/, '//***:***@');
+}
+
+function formatDatabaseError(error) {
+  if (!MONGODB_URI) {
+    return 'Missing MongoDB connection string. Set MONGODB_URI in .env or config.env.';
+  }
+
+  if (!error) {
+    return 'MongoDB is not connected yet.';
+  }
+
+  if (error.name === 'MongooseServerSelectionError') {
+    return 'MongoDB Atlas is unreachable. Check your Atlas IP access list, cluster status, and connection string.';
+  }
+
+  return error.message || 'MongoDB connection failed.';
+}
+
+function getDatabaseStatusPayload() {
+  return {
+    status: databaseState.status,
+    databaseName: DB_NAME,
+    source: mongoConfigSource,
+    lastConnectedAt: databaseState.lastConnectedAt,
+    retryAt: databaseState.retryAt,
+    error: databaseState.lastError,
+  };
+}
+
+function scheduleDatabaseReconnect() {
+  if (databaseRetryTimer || !MONGODB_URI) {
+    return;
+  }
+
+  databaseState.retryAt = new Date(Date.now() + DATABASE_RETRY_MS).toISOString();
+  databaseRetryTimer = setTimeout(() => {
+    databaseRetryTimer = null;
+    connectDatabaseWithRetry();
+  }, DATABASE_RETRY_MS);
+}
+
 async function connectDatabase() {
   if (!MONGODB_URI) {
     throw new Error(
@@ -119,23 +223,72 @@ async function connectDatabase() {
     );
   }
 
+  databaseState.status = 'connecting';
+  databaseState.lastError = null;
+  databaseState.retryAt = null;
+
   await mongoose.connect(MONGODB_URI, {
     dbName: DB_NAME,
+    serverSelectionTimeoutMS: 10000,
   });
-  console.log(`Connected to MongoDB database: ${DB_NAME}`);
+
+  databaseState.status = 'connected';
+  databaseState.lastError = null;
+  databaseState.lastConnectedAt = new Date().toISOString();
+  databaseState.retryAt = null;
+  console.log(
+    `Connected to MongoDB database "${DB_NAME}" using ${mongoConfigSource} (${redactMongoUri(
+      MONGODB_URI
+    )})`
+  );
+}
+
+async function connectDatabaseWithRetry() {
+  if (!MONGODB_URI) {
+    databaseState.status = 'missing_config';
+    databaseState.lastError = formatDatabaseError();
+    return;
+  }
+
+  if (mongoose.connection.readyState === 1 || mongoose.connection.readyState === 2) {
+    return;
+  }
+
+  try {
+    await connectDatabase();
+  } catch (error) {
+    databaseState.status = 'error';
+    databaseState.lastError = formatDatabaseError(error);
+    console.error('Failed to connect to MongoDB:', error);
+    scheduleDatabaseReconnect();
+  }
+}
+
+function requireDatabase(_req, res, next) {
+  if (mongoose.connection.readyState === 1) {
+    return next();
+  }
+
+  return res.status(503).json({
+    error: formatDatabaseError(databaseState.lastError ? new Error(databaseState.lastError) : null),
+    database: getDatabaseStatusPayload(),
+  });
+}
+
+function emitDatabaseUnavailable(socket, eventName) {
+  socket.emit(eventName, formatDatabaseError(databaseState.lastError ? new Error(databaseState.lastError) : null));
 }
 
 app.use('/uploads', express.static(uploadsDir));
 
 app.get('/api/health', (_req, res) => {
-  res.json({
-    ok: true,
-    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-  });
-});
+  const isConnected = mongoose.connection.readyState === 1;
 
-app.get('/', (_req, res) => {
-  res.send('Server is running 🚀');
+  res.status(isConnected ? 200 : 503).json({
+    ok: isConnected,
+    app: 'anony',
+    database: getDatabaseStatusPayload(),
+  });
 });
 
 app.post('/api/upload', upload.single('file'), (req, res) => {
@@ -151,6 +304,8 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
     mimetype: file.mimetype,
   });
 });
+
+app.use('/api/rooms', requireDatabase);
 
 app.get('/api/rooms', async (_req, res) => {
   try {
@@ -199,11 +354,35 @@ app.get('/api/rooms/:code/messages', async (req, res) => {
   }
 });
 
+app.post('/api/rooms/:code/messages', async (req, res) => {
+  try {
+    const roomCode = normalizeRoomCode(req.params.code);
+    const savedMessage = await createAndBroadcastMessage({
+      roomCode,
+      text: req.body?.text,
+      user: req.body?.user,
+      type: req.body?.type,
+      file: req.body?.file,
+    });
+
+    return res.status(201).json(savedMessage);
+  } catch (error) {
+    console.error('Failed to create message:', error);
+    const status = error.message === 'Room not found' ? 404 : 400;
+    return res.status(status).json({ error: error.message || 'Failed to create message' });
+  }
+});
+
 io.on('connection', (socket) => {
   console.log('A user connected');
 
   socket.on('joinRoom', async (roomCode) => {
     try {
+      if (mongoose.connection.readyState !== 1) {
+        emitDatabaseUnavailable(socket, 'roomError');
+        return;
+      }
+
       const normalizedCode = normalizeRoomCode(roomCode);
       if (!normalizedCode) {
         socket.emit('roomError', 'Room code is required');
@@ -228,45 +407,15 @@ io.on('connection', (socket) => {
 
   socket.on('sendMessage', async (data = {}) => {
     try {
-      const roomCode = normalizeRoomCode(data.roomCode);
-      if (!roomCode) {
-        socket.emit('messageError', 'Room code is required');
+      if (mongoose.connection.readyState !== 1) {
+        emitDatabaseUnavailable(socket, 'messageError');
         return;
       }
 
-      const roomExists = await ensureRoomExists(roomCode);
-      if (!roomExists) {
-        socket.emit('messageError', 'Room not found');
-        return;
-      }
-
-      const messagePayload = {
-        roomCode,
-        text: typeof data.text === 'string' ? data.text.trim() : '',
-        user: data.user || 'Anonymous',
-        type: data.type === 'file' ? 'file' : 'text',
-        timestamp: new Date(),
-      };
-
-      if (messagePayload.type === 'file' && data.file) {
-        messagePayload.file = {
-          url: data.file.url,
-          originalName: data.file.originalName,
-          size: data.file.size,
-          mimeType: data.file.mimeType,
-        };
-      }
-
-      if (messagePayload.type === 'text' && !messagePayload.text) {
-        socket.emit('messageError', 'Message cannot be empty');
-        return;
-      }
-
-      const savedMessage = await Message.create(messagePayload);
-      io.to(roomCode).emit('newMessage', savedMessage.toObject());
+      await createAndBroadcastMessage(data);
     } catch (error) {
       console.error('Failed to send message:', error);
-      socket.emit('messageError', 'Failed to send message');
+      socket.emit('messageError', error.message || 'Failed to send message');
     }
   });
 
@@ -276,19 +425,14 @@ io.on('connection', (socket) => {
 });
 
 app.get('*', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+  res.sendFile(path.join(staticDir, 'index.html'));
 });
 
 async function startServer() {
-  try {
-    await connectDatabase();
-    server.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
-    });
-  } catch (error) {
-    console.error('Failed to start server:', error);
-    process.exit(1);
-  }
+  server.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+    connectDatabaseWithRetry();
+  });
 }
 
 startServer();
