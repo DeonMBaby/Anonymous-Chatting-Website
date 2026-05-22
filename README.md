@@ -2,7 +2,7 @@
 
 Anonymous real-time chat app built with React, Express, Socket.IO, and MongoDB Atlas.
 
-The frontend and backend are meant to run together from the Express server. In local development, use the app on `http://127.0.0.1:5000/` so room creation, messaging, uploads, and sockets all use the same origin.
+The frontend and backend are meant to run together from the Express server. In deployment, use the app on `https://anonymous-chatting-website.onrender.com/` so room creation, messaging, uploads, and sockets all use the same origin.
 
 ## Stack
 
@@ -75,7 +75,7 @@ npm start
 Then open:
 
 ```text
-http://127.0.0.1:5000/
+https://anonymous-chatting-website.onrender.com/
 ```
 
 Important:
@@ -149,7 +149,7 @@ If room creation fails, check these first:
 2. Confirm your current IP is allowed in Atlas `Network Access`.
 3. Confirm the username and password inside `MONGODB_URI`.
 4. Make sure the cluster is active and not paused.
-5. Open `http://127.0.0.1:5000/api/health` and inspect the `database` object.
+5. Open `https://anonymous-chatting-website.onrender.com/api/health` and inspect the `database` object.
 
 If Atlas is unreachable, the server now stays up and reports database status clearly instead of crashing immediately.
 
@@ -160,7 +160,7 @@ Recommended local workflow:
 1. Update `.env` with a valid Atlas URI.
 2. Run `node connect.cjs`.
 3. Start the app with `npm start`.
-4. Open `http://127.0.0.1:5000/`.
+4. Open `https://anonymous-chatting-website.onrender.com/`.
 5. Create a room and test messaging.
 
 ## Deployment Notes

@@ -7,7 +7,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/uploads': {
-        target: 'http://localhost:3002',
+        target: 'https://anonymous-chatting-website.onrender.com',
         changeOrigin: true,
         secure: false,
       },
