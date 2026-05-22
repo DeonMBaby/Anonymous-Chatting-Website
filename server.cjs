@@ -13,9 +13,42 @@ dotenv.config({ path: path.join(__dirname, 'config.env') });
 
 const app = express();
 const server = http.createServer(app);
+
+// Allow the deployed Vercel frontend in production and local Vite URLs in development.
+const allowedOrigins = [
+  'https://anonymous-chatting-website-bb9y.vercel.app',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+];
+
+function isAllowedOrigin(origin) {
+  return !origin || allowedOrigins.includes(origin);
+}
+
+const corsOptions = {
+  origin(origin, callback) {
+    if (isAllowedOrigin(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error(`Origin ${origin} is not allowed by CORS`));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+};
+
 const io = socketIo(server, {
   cors: {
-    origin: '*',
+    origin(origin, callback) {
+      if (isAllowedOrigin(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new Error(`Origin ${origin} is not allowed by Socket.IO CORS`));
+    },
+    credentials: true,
     methods: ['GET', 'POST'],
   },
 });
@@ -46,7 +79,7 @@ const databaseState = {
 
 let databaseRetryTimer = null;
 
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.static(staticDir));
 
