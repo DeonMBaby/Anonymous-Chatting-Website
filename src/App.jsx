@@ -6,6 +6,32 @@ const socket = io(API_BASE, {
   transports: ['websocket', 'polling'],
 })
 
+function resolveAssetUrl(url) {
+  if (!url) {
+    return url
+  }
+
+  if (/^https?:\/\//i.test(url)) {
+    return url
+  }
+
+  return `${API_BASE}${url.startsWith('/') ? url : `/${url}`}`
+}
+
+function normalizeMessage(entry) {
+  if (!entry?.file?.url) {
+    return entry
+  }
+
+  return {
+    ...entry,
+    file: {
+      ...entry.file,
+      url: resolveAssetUrl(entry.file.url),
+    },
+  }
+}
+
 function JoinRoom({ onJoin, toggleBwMode, bwMode }) {
   const [roomCode, setRoomCode] = useState('')
   const [error, setError] = useState('')
@@ -131,9 +157,10 @@ function ChatRoom({ roomCode, onLeave, toggleBwMode, bwMode }) {
   useEffect(() => {
     socket.emit('joinRoom', roomCode)
 
-    const handleLoadMessages = (loadedMessages) => setMessages(loadedMessages)
+    const handleLoadMessages = (loadedMessages) =>
+      setMessages(loadedMessages.map(normalizeMessage))
     const handleNewMessage = (incomingMessage) =>
-      setMessages((currentMessages) => [...currentMessages, incomingMessage])
+      setMessages((currentMessages) => [...currentMessages, normalizeMessage(incomingMessage)])
 
     socket.on('loadMessages', handleLoadMessages)
     socket.on('newMessage', handleNewMessage)
@@ -174,7 +201,7 @@ function ChatRoom({ roomCode, onLeave, toggleBwMode, bwMode }) {
         const refreshedResponse = await fetch(`${API_BASE}/api/rooms/${roomCode}/messages`)
         if (refreshedResponse.ok) {
           const refreshedMessages = await refreshedResponse.json()
-          setMessages(refreshedMessages)
+          setMessages(refreshedMessages.map(normalizeMessage))
         }
         return
       }
@@ -219,7 +246,7 @@ function ChatRoom({ roomCode, onLeave, toggleBwMode, bwMode }) {
         if (request.status === 200) {
           const data = JSON.parse(request.responseText)
           const filePayload = {
-            url: data.url,
+            url: resolveAssetUrl(data.url),
             originalName: data.originalName,
             size: data.size,
             mimeType: data.mimetype,
@@ -298,7 +325,7 @@ function ChatRoom({ roomCode, onLeave, toggleBwMode, bwMode }) {
                   </div>
                 ) : (
                   <div className="file-link">
-                    <a href={entry.file.url} rel="noreferrer">
+                    <a href={entry.file.url} rel="noreferrer" target="_blank">
                       {entry.file.originalName}
                     </a>
                     <span className="file-size">
